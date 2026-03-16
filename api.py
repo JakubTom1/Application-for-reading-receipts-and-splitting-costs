@@ -34,7 +34,10 @@ class DBItem(Base):
     id = Column(Integer, primary_key=True, index=True)
     receipt_id = Column(Integer, ForeignKey("receipts.id"))
     name = Column(String(255), index=True)
-    price = Column(Float)
+    quantity = Column(Float)
+    unit_price = Column(Float)
+    discount = Column(Float)
+    final_price = Column(Float)
 
     # Establish relationship back to receipt
     receipt = relationship("DBReceipt", back_populates="items")
@@ -61,7 +64,10 @@ app = FastAPI(title="Receipt Splitter API")
 
 class ReceiptItem(BaseModel):
     name: str
-    price: float
+    quantity: float
+    unit_price: float
+    discount: float
+    final_price: float
 
 
 class ReceiptPayload(BaseModel):
@@ -89,7 +95,10 @@ def save_receipt(payload: ReceiptPayload, db: Session = Depends(get_db)):
         db_item = DBItem(
             receipt_id=new_receipt.id,
             name=item.name,
-            price=item.price
+            quantity=item.quantity,
+            unit_price=item.unit_price,
+            discount=item.discount,
+            final_price=item.final_price
         )
         db.add(db_item)
 
