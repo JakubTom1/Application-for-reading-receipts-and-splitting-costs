@@ -1,24 +1,28 @@
 import os
-from dotenv import load_dotenv
-from google import genai
+import io
 import json
+from google import genai
 from PIL import Image
-import requests
+from schemas import ReceiptItemScanned
+from pydantic import ValidationError
 
-load_dotenv()
-
+# Initialize Gemini Client
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("No API key in .env! file")
 
-client = genai.Client(api_key=API_KEY)
+ai_client = genai.Client(api_key=API_KEY)
 
-def scan_receipt(image_path):
-    print(f"Loading image: {image_path}...")
+
+def analyze_image_with_gemini(image_bytes: bytes) -> list[ReceiptItemScanned]:
+    """
+    Sends image to Gemini, retrieves JSON, and strictly validates it
+    using Pydantic models before returning.
+    """
     try:
-        img = Image.open(image_path)
-    except FileNotFoundError:
-        return "File not found. Please check the path."
+        img = Image.open(io.BytesIO(image_bytes))
+    except Exception as e:
+        raise ValueError("Invalid image format.")
 
     prompt = """
         You are an expert expense analysis assistant specializing in Polish fiscal receipts (paragon fiskalny). 
@@ -47,52 +51,34 @@ def scan_receipt(image_path):
         6. Skip the overall receipt total sum, amount paid, change, PTU/VAT summaries, and store details.
     """
 
-    print("Sending for analysis (this will take a few seconds)...")
+    # Call Gemini API
+    response = ai_client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=[prompt, img]
+    )
 
+    raw_text = response.text.strip()
+
+    # Clean up potential markdown formatting from Gemini
+    if raw_text.startswith("```json"):
+        raw_text = raw_text[7:]
+    if raw_text.endswith("```"):
+        raw_text = raw_text[:-3]
+
+    # 1. Check if it's valid JSON
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[prompt, img]
-        )
-
-        raw_text = response.text.strip()
-
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
-
         json_data = json.loads(raw_text.strip())
-        return json_data
-
     except json.JSONDecodeError:
-        print("Model did not return valid JSON format.")
-        print("Raw model response:\n", raw_text)
-        return None
-    except Exception as e:
-        print(f"API communication error: {e}")
-        return None
+        raise ValueError("Gemini did not return valid JSON.")
 
+    # 2. STRICT VALIDATION: Check if JSON matches our Pydantic schema
+    validated_items = []
+    try:
+        for item in json_data:
+            # This line will crash (throw ValidationError) if types are wrong or keys are missing
+            valid_item = ReceiptItemScanned(**item)
+            validated_items.append(valid_item)
+    except ValidationError as e:
+        raise ValueError(f"Gemini returned JSON with invalid structure: {e}")
 
-if __name__ == "__main__":
-    # 1. Scan the receipt using Gemini
-    result = scan_receipt("paragon3.jpg")
-
-    if result:
-        print("\n=== SUCCESS! RECOGNIZED PRODUCTS ===")
-        print(json.dumps(result, indent=4, ensure_ascii=False))
-
-        # 2. Prepare the payload for the API
-        # We hardcode user_id=1 for now, later the mobile app will provide the logged-in user
-        api_payload = {
-            "user_id": 1,
-            "items": result
-        }
-
-        # 3. Send the data to your local FastAPI server
-        print("\nSending data to the MySQL database via API...")
-        try:
-            response = requests.post("http://127.0.0.1:8000/receipts/save", json=api_payload)
-            print("API Response:", response.json())
-        except requests.exceptions.ConnectionError:
-            print("Error: Cannot connect to API. Make sure uvicorn is running!")
+    return validated_items
