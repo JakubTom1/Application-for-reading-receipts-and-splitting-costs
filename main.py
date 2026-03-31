@@ -13,12 +13,7 @@ if not API_KEY:
 
 client = genai.Client(api_key=API_KEY)
 
-def scan_receipt(image_path):
-    print(f"Loading image: {image_path}...")
-    try:
-        img = Image.open(image_path)
-    except FileNotFoundError:
-        return "File not found. Please check the path."
+def scan_receipt(img: Image.Image):
 
     prompt = """
         You are an expert expense analysis assistant specializing in Polish fiscal receipts (paragon fiskalny). 
@@ -75,24 +70,27 @@ def scan_receipt(image_path):
 
 
 if __name__ == "__main__":
-    # 1. Scan the receipt using Gemini
-    result = scan_receipt("paragon3.jpg")
+    try:
+        # Ładujemy obraz z dysku tylko w przypadku testu lokalnego
+        test_img = Image.open("paragon3.jpg")
+        result = scan_receipt(test_img)
 
-    if result:
-        print("\n=== SUCCESS! RECOGNIZED PRODUCTS ===")
-        print(json.dumps(result, indent=4, ensure_ascii=False))
+        if result:
+            print("\n=== SUCCESS! RECOGNIZED PRODUCTS ===")
+            print(json.dumps(result, indent=4, ensure_ascii=False))
 
-        # 2. Prepare the payload for the API
-        # We hardcode user_id=1 for now, later the mobile app will provide the logged-in user
-        api_payload = {
-            "user_id": 1,
-            "items": result
-        }
+            api_payload = {
+                "user_id": 1,
+                "items": result
+            }
 
-        # 3. Send the data to your local FastAPI server
-        print("\nSending data to the MySQL database via API...")
-        try:
-            response = requests.post("http://127.0.0.1:8000/receipts/save", json=api_payload)
-            print("API Response:", response.json())
-        except requests.exceptions.ConnectionError:
-            print("Error: Cannot connect to API. Make sure uvicorn is running!")
+            print("\nSending data to the MySQL database via API...")
+            try:
+                response = requests.post("[http://127.0.0.1:8000/receipts/save](http://127.0.0.1:8000/receipts/save)",
+                                         json=api_payload)
+                print("API Response:", response.json())
+            except requests.exceptions.ConnectionError:
+                print("Error: Cannot connect to API. Make sure uvicorn is running!")
+
+    except FileNotFoundError:
+        print("File not found. Please check the path.")

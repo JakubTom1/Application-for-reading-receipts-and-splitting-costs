@@ -1,10 +1,15 @@
 import os
+import io
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List
 from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
+from PIL import Image
+
+# Importujemy funkcję wykonującą prompt do Gemini z pliku main.py
+from main import scan_receipt
 
 # Load environment variables
 load_dotenv()
@@ -18,12 +23,12 @@ Base = declarative_base()
 
 
 # ---------------------------------------------------------
-# 1. SQLALCHEMY MODELS (MySQL Tables)
+# 1. SQLALCHEMY MODELS (MySQL Tables) - uproszczone, bez użytkowników!
 # ---------------------------------------------------------
 class DBReceipt(Base):
     __tablename__ = "receipts"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, index=True)
+    user_id = Column(Integer, index=True)  # Zwykłe int na potrzeby testu
 
     # Establish relationship with items
     items = relationship("DBItem", back_populates="receipt")
@@ -47,7 +52,6 @@ class DBItem(Base):
 Base.metadata.create_all(bind=engine)
 
 
-# Dependency to get DB session
 def get_db():
     db = SessionLocal()
     try:
@@ -78,6 +82,28 @@ class ReceiptPayload(BaseModel):
 # ---------------------------------------------------------
 # 3. API ENDPOINTS
 # ---------------------------------------------------------
+
+@app.post("/analyze")
+async def analyze_receipt_endpoint(file: UploadFile = File(...)):
+    """
+    Odbiera obraz (np. z aplikacji Android), konwertuje go i wywołuje
+    funkcję scan_receipt() z pliku main.py, aby odpytać Gemini.
+    """
+    try:
+        image_bytes = await file.read()
+        img = Image.open(io.BytesIO(image_bytes))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Nieprawidłowy format obrazu.")
+
+    # Korzystamy ze ściągniętej funkcji z main.py!
+    result = scan_receipt(img)
+
+    if result is None:
+        raise HTTPException(status_code=500, detail="AI nie zdołało przeanalizować paragonu.")
+
+    return result
+
+
 @app.post("/receipts/save")
 def save_receipt(payload: ReceiptPayload, db: Session = Depends(get_db)):
     """
