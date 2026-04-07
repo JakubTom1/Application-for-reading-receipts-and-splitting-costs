@@ -1,96 +1,155 @@
-import os
-from dotenv import load_dotenv
-from google import genai
-import json
-from PIL import Image
-import requests
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from sqlalchemy.orm import Session
+from typing import List, Dict
+from collections import defaultdict
 
-load_dotenv()
+# Imports from your files
+from database import engine, get_db
+import models
+import schemas
+import ai_service
 
-API_KEY = os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    raise ValueError("No API key in .env! file")
+# Create database tables (if they don't exist)
+models.Base.metadata.create_all(bind=engine)
 
-client = genai.Client(api_key=API_KEY)
+app = FastAPI(
+    title="Receipt Splitter API",
+    description="Complete backend for scanning receipts and settling expenses among friends."
+)
 
-def scan_receipt(img: Image.Image):
 
-    prompt = """
-        You are an expert expense analysis assistant specializing in Polish fiscal receipts (paragon fiskalny). 
-        Analyze this receipt. Extract the list of purchased products, their quantities, unit prices, discounts applied to them, and their FINAL paid prices.
-    
-        CRITICAL RULES FOR POLISH RECEIPTS:
-        1. MULTIPLIERS & UNIT PRICE: Look for quantity multipliers (e.g., "12 x2,39 28,68"). The quantity is 12, the unit_price is 2.39. If no multiplier is present, default quantity to 1 and unit_price equals the line price.
-        2. DISCOUNTS (OPUST): Discounts are printed BELOW the product (e.g., "OPUST -4,50" or just "-4,50"). You MUST account for them as a positive float in the "discount" field (e.g., 4.50). If no discount is applied, set "discount" to 0.0. The final price is usually printed directly below the "OPUST" line.
-           Example of a discounted item on receipt:
-           SokTymbarkJabłko1l     3 x5,49 16,47
-           OPUST                         -4,50
-                                         11,97
-           Correct Extraction -> "name": "SokTymbarkJabłko1l", "quantity": 3.0, "unit_price": 5.49, "discount": 4.50, "final_price": 11.97
-        3. If There is no final proce after discount you have to subtract discount from the unit price to get final price.
-           Example of a discounted item without final price line:
-           KawaKrupica250g   1 x19,99 19,99
-           OPUST                      -3,00
-           (final price not listed, so calculate: 19.99 - 3.00 = 16.99)
-        4. Return ONLY pure JSON format as a list of dictionaries. Do not add any text before or after JSON (no ```json markers).
-        5. Each dictionary MUST have exactly these keys: 
-           - "name" (string)
-           - "quantity" (float)
-           - "unit_price" (float)
-           - "discount" (float)
-           - "final_price" (float - the total paid for these items AFTER discount)
-        6. Skip the overall receipt total sum, amount paid, change, PTU/VAT summaries, and store details.
+# ---------------------------------------------------------
+# 1. USER MANAGEMENT
+# ---------------------------------------------------------
+@app.get("/users", response_model=List[schemas.UserResponse])
+def get_users(db: Session = Depends(get_db)):
+    """Fetches the list of all friends from the database."""
+    return db.query(models.DBUser).all()
+
+
+@app.post("/users", response_model=schemas.UserResponse)
+def create_user(name: str, db: Session = Depends(get_db)):
+    """Adds a new person to the settlements."""
+    new_user = models.DBUser(name=name)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+# ---------------------------------------------------------
+# 2. RECEIPT SCANNING AND SAVING
+# ---------------------------------------------------------
+@app.post("/analyze", response_model=List[schemas.ReceiptItemScanned])
+async def analyze_receipt(file: UploadFile = File(...)):
     """
-
-    print("Sending for analysis (this will take a few seconds)...")
-
+    STEP 1: Sends the image to Gemini (via ai_service.py) and returns
+    the recognized products to the app for user verification.
+    """
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[prompt, img]
-        )
-
-        raw_text = response.text.strip()
-
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
-
-        json_data = json.loads(raw_text.strip())
-        return json_data
-
-    except json.JSONDecodeError:
-        print("Model did not return valid JSON format.")
-        print("Raw model response:\n", raw_text)
-        return None
+        image_bytes = await file.read()
+        validated_items = ai_service.analyze_image_with_gemini(image_bytes)
+        return validated_items
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        print(f"API communication error: {e}")
-        return None
+        raise HTTPException(status_code=500, detail="Internal server error during analysis.")
 
 
-if __name__ == "__main__":
-    try:
-        # Ładujemy obraz z dysku tylko w przypadku testu lokalnego
-        test_img = Image.open("paragon3.jpg")
-        result = scan_receipt(test_img)
+@app.post("/receipts/save")
+def save_final_receipt(payload: schemas.ReceiptCreate, db: Session = Depends(get_db)):
+    """
+    STEP 2: The app sends the corrected receipt with assigned users.
+    We save the receipt, products, and create splits (who pays for what).
+    """
+    # Check if the payer exists
+    payer = db.query(models.DBUser).filter(models.DBUser.id == payload.payer_id).first()
+    if not payer:
+        raise HTTPException(status_code=404, detail="Payer user not found")
 
-        if result:
-            print("\n=== SUCCESS! RECOGNIZED PRODUCTS ===")
-            print(json.dumps(result, indent=4, ensure_ascii=False))
+    # 1. Create the main receipt entry (with info on who paid upfront)
+    new_receipt = models.DBReceipt(
+        payer_id=payload.payer_id,
+        event_id=payload.event_id
+    )
+    db.add(new_receipt)
+    db.commit()
+    db.refresh(new_receipt)
 
-            api_payload = {
-                "user_id": 1,
-                "items": result
-            }
+    # 2. Saving individual products
+    for item_data in payload.items:
+        db_item = models.DBItem(
+            receipt_id=new_receipt.id,
+            name=item_data.name,
+            quantity=item_data.quantity,
+            unit_price=item_data.unit_price,
+            discount=item_data.discount,
+            final_price=item_data.final_price
+        )
+        db.add(db_item)
+        db.commit()
+        db.refresh(db_item)
 
-            print("\nSending data to the MySQL database via API...")
-            try:
-                response = requests.post("[http://127.0.0.1:8000/receipts/save](http://127.0.0.1:8000/receipts/save)",
-                                         json=api_payload)
-                print("API Response:", response.json())
-            except requests.exceptions.ConnectionError:
-                print("Error: Cannot connect to API. Make sure uvicorn is running!")
+        # 3. Saving SPLITS (Who participates in the cost of this product)
+        for split_data in item_data.split_among:
+            db_split = models.DBItemSplit(
+                item_id=db_item.id,
+                user_id=split_data.user_id
+            )
+            db.add(db_split)
 
-    except FileNotFoundError:
-        print("File not found. Please check the path.")
+    db.commit()
+    return {"status": "success", "receipt_id": new_receipt.id}
+
+
+# ---------------------------------------------------------
+# 3. SETTLEMENTS (Who owes whom?)
+# ---------------------------------------------------------
+@app.get("/receipts", response_model=List[schemas.ReceiptResponse])
+def get_all_receipts(db: Session = Depends(get_db)):
+    """Fetches the entire receipt history with all details."""
+    return db.query(models.DBReceipt).all()
+
+
+@app.get("/balances")
+def calculate_balances(db: Session = Depends(get_db)):
+    """
+    NEW: Calculates debts.
+    Algorithm: Final product price / number of assigned users.
+    Every assigned user (except the payer) owes this amount to the payer.
+    """
+    receipts = db.query(models.DBReceipt).all()
+
+    # Debt dictionary: balances[debtor][creditor] = amount
+    balances = defaultdict(lambda: defaultdict(float))
+
+    for receipt in receipts:
+        payer_name = receipt.payer.name
+
+        for item in receipt.items:
+            # If no one is assigned, skip the product
+            if not item.splits:
+                continue
+
+            # Divide the amount equally among assigned users
+            split_amount = item.final_price / len(item.splits)
+
+            for split in item.splits:
+                debtor_name = split.user.name
+
+                # User does not owe money to themselves
+                if debtor_name != payer_name:
+                    balances[debtor_name][payer_name] += split_amount
+
+    # Format the result into readable JSON
+    result = []
+    for debtor, debts in balances.items():
+        for creditor, amount in debts.items():
+            if amount > 0:
+                result.append({
+                    "debtor": debtor,
+                    "owes_to": creditor,
+                    "amount": round(amount, 2)
+                })
+
+    return {"summary": result}

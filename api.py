@@ -8,8 +8,8 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
 from PIL import Image
 
-# Importujemy funkcję wykonującą prompt do Gemini z pliku main.py
-from main import scan_receipt
+# Importujemy funkcję wykonującą prompt do Gemini z pliku old_ai.py
+from old_ai import scan_receipt
 
 # Load environment variables
 load_dotenv()
@@ -87,7 +87,7 @@ class ReceiptPayload(BaseModel):
 async def analyze_receipt_endpoint(file: UploadFile = File(...)):
     """
     Odbiera obraz (np. z aplikacji Android), konwertuje go i wywołuje
-    funkcję scan_receipt() z pliku main.py, aby odpytać Gemini.
+    funkcję scan_receipt() z pliku old_ai.py, aby odpytać Gemini.
     """
     try:
         image_bytes = await file.read()
@@ -95,7 +95,7 @@ async def analyze_receipt_endpoint(file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(status_code=400, detail="Nieprawidłowy format obrazu.")
 
-    # Korzystamy ze ściągniętej funkcji z main.py!
+    # Korzystamy ze ściągniętej funkcji z old_ai.py!
     result = scan_receipt(img)
 
     if result is None:
