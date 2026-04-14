@@ -5,6 +5,9 @@ from google import genai
 from PIL import Image
 from schemas import ReceiptItemScanned
 from pydantic import ValidationError
+import time
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from google.genai import errors
 
 # Initialize Gemini Client
 API_KEY = os.getenv("GEMINI_API_KEY")
@@ -13,6 +16,12 @@ if not API_KEY:
 
 ai_client = genai.Client(api_key=API_KEY)
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=10),
+    retry=retry_if_exception_type(errors.ServerError),
+    reraise=True
+)
 
 def analyze_image_with_gemini(image_bytes: bytes) -> list[ReceiptItemScanned]:
     """
@@ -50,12 +59,15 @@ def analyze_image_with_gemini(image_bytes: bytes) -> list[ReceiptItemScanned]:
            - "final_price" (float - the total paid for these items AFTER discount)
         6. Skip the overall receipt total sum, amount paid, change, PTU/VAT summaries, and store details.
     """
+    start_time = time.time()
 
     # Call Gemini API
     response = ai_client.models.generate_content(
         model='gemini-2.5-flash',
         contents=[prompt, img]
     )
+    gemini_time = time.time() - start_time
+    print(f"⏱️ GEMINI API time: {gemini_time:.2f} seconds")
 
     raw_text = response.text.strip()
 
