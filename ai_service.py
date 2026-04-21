@@ -63,7 +63,7 @@ def analyze_image_with_gemini(image_bytes: bytes) -> list[ReceiptItemScanned]:
 
     # Call Gemini API
     response = ai_client.models.generate_content(
-        model='gemini-2.0-flash',
+        model='gemini-2.5-flash',
         contents=[prompt, img]
     )
     gemini_time = time.time() - start_time

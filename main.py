@@ -50,28 +50,42 @@ async def analyze_receipt(file: UploadFile = File(...)):
     the recognized products to the app for user verification.
     """
     total_start_time = time.time()
-    try:
-        image_bytes = await file.read()
-        validated_items = await asyncio.to_thread(ai_service.analyze_image_with_gemini, image_bytes)
-        total_time = time.time() - total_start_time
-        print(f"🚀 Overall /analyze endpoint time: {total_time:.2f} seconds\n")
-        return validated_items
-    except ValueError as e:
-        print(f"--- DATA ERROR (400) ---: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        error_msg = str(e)
-        if "503" in error_msg and "high demand" in error_msg:
-            print("--- GOOGLE API OVERLOAD (503) ---")
-            raise HTTPException(
-                status_code=503,
-                detail="AI servers are currently overloaded. Wait a few seconds and try again."
-            )
-        else:
-            print("--- CRITICAL SERVER ERROR (500) ---")
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=error_msg)
+    max_attempts = 3
+
+    image_bytes = await file.read()
+    for attempt in range(max_attempts):
+        try:
+            validated_items = await asyncio.to_thread(ai_service.analyze_image_with_gemini, image_bytes)
+            total_time = time.time() - total_start_time
+            print(f"🚀 Overall /analyze endpoint time: {total_time:.2f} seconds\n")
+            return validated_items
+        except ValueError as e:
+            print(f"--- DATA ERROR (400) ---: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            error_msg = str(e)
+            is_rate_limit = "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg
+            is_overload = "503" in error_msg and "high demand" in error_msg
+
+            if is_rate_limit or is_overload:
+                if attempt < max_attempts - 1:
+                    wait_time = 38
+                    print(f"\n⚠️ --- GOOGLE API LIMIT HIT ({'429' if is_rate_limit else '503'}) ---")
+                    print(
+                        f"⏳ Waiting {wait_time} seconds before automatic re-try (Attempt {attempt + 2}/{max_attempts})...\n")
+
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    print("--- GOOGLE API KEEPS FAILING ---")
+                    raise HTTPException(
+                        status_code=429 if is_rate_limit else 503,
+                        detail="AI is currently overloaded. Try again later."
+                    )
+                print("--- CRITICAL SERVER ERROR (500) ---")
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.post("/receipts/save")
@@ -128,6 +142,19 @@ def get_all_receipts(db: Session = Depends(get_db)):
     """Fetches the entire receipt history with all details."""
     return db.query(models.DBReceipt).all()
 
+@app.get("/events")
+def get_all_events(db: Session = Depends(get_db)):
+    """Pobiera listę wszystkich wydarzeń (Tricounts)."""
+    return db.query(models.DBEvent).all()
+
+@app.post("/events")
+def create_event(name: str, db: Session = Depends(get_db)):
+    """Tworzy nowe wydarzenie do rozliczeń."""
+    new_event = models.DBEvent(name=name)
+    db.add(new_event)
+    db.commit()
+    db.refresh(new_event)
+    return {"id": new_event.id, "name": new_event.name}
 
 @app.get("/events/{event_id}/balances")
 def get_event_balances(event_id: int, db: Session = Depends(get_db)):
