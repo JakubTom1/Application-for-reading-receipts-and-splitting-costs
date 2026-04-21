@@ -78,6 +78,11 @@ class ReceiptPayload(BaseModel):
     user_id: int
     items: List[ReceiptItem]
 
+class DBUser(Base):
+    """Table storing users/friends who participate in sharing costs."""
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), index=True)
 
 # ---------------------------------------------------------
 # 3. API ENDPOINTS
@@ -136,3 +141,14 @@ def save_receipt(payload: ReceiptPayload, db: Session = Depends(get_db)):
         "receipt_id": new_receipt.id,
         "items_saved": len(payload.items)
     }
+
+
+
+@app.get("/users")
+def get_users(db: Session = Depends(get_db)):
+    """
+    Simple endpoint to retrieve all users from the database.
+    Useful for testing and assigning items to users in the future.
+    """
+    users = db.query(DBUser).all()
+    return users
