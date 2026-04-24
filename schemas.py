@@ -30,8 +30,18 @@ class ReceiptCreate(BaseModel):
     items: List[ReceiptItemCreate]
 
 # ---------------------------------------------------------
-# SCHEMAS FOR FETCHING (Output to Android App for GET requests)
+# SCHEMAS FOR AUTHENTICATION
 # ---------------------------------------------------------
+class UserCreate(BaseModel):
+    """Schema for creating a new user with a password."""
+    name: str
+    password: str
+
+class LoginRequest(BaseModel):
+    """Schema for user login request."""
+    user_id: int
+    password: str
+
 class UserResponse(BaseModel):
     id: int
     name: str

@@ -7,6 +7,7 @@ class DBUser(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), index=True)
+    password_hash = Column(String(255), nullable=False)  # Hashed password for authentication
 
     # Relationships
     receipts_paid = relationship("DBReceipt", back_populates="payer")
@@ -66,8 +67,10 @@ class DBItemSplit(Base):
     __tablename__ = "item_splits"
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("items.id"))
-    participant_id = Column(Integer, ForeignKey("event_participants.id"))
+    legacy_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    participant_id = Column(Integer, ForeignKey("event_participants.id"), nullable=True)
 
     # Relationships
     item = relationship("DBItem", back_populates="splits")
     participant = relationship("DBEventParticipant", back_populates="splits")
+    legacy_user = relationship("DBUser")

@@ -5,12 +5,29 @@ from collections import defaultdict
 import traceback
 import time
 import asyncio
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError, VerificationError
 
 # Imports from your files
 from database import engine, get_db
 import models
 import schemas
 import ai_service
+
+# Password hashing configuration with Argon2
+ph = PasswordHasher()
+
+def hash_password(password: str) -> str:
+    """Hash a password for secure storage using Argon2."""
+    return ph.hash(password)
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plain password against a hashed password."""
+    try:
+        ph.verify(hashed_password, plain_password)
+        return True
+    except (VerifyMismatchError, VerificationError):
+        return False
 
 # Create database tables (if they don't exist)
 models.Base.metadata.create_all(bind=engine)
@@ -31,13 +48,31 @@ def get_users(db: Session = Depends(get_db)):
 
 
 @app.post("/users", response_model=schemas.UserResponse)
-def create_user(name: str, db: Session = Depends(get_db)):
-    """Adds a new person to the settlements."""
-    new_user = models.DBUser(name=name)
+def create_user(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
+    """Adds a new person to the settlements with a password."""
+    # Check if user with this name already exists
+    existing_user = db.query(models.DBUser).filter(models.DBUser.name == user_data.name).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this name already exists")
+    
+    hashed_password = hash_password(user_data.password)
+    new_user = models.DBUser(name=user_data.name, password_hash=hashed_password)
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
     return new_user
+
+@app.post("/login", response_model=schemas.UserResponse)
+def login_user(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
+    """Authenticates a user with their password."""
+    user = db.query(models.DBUser).filter(models.DBUser.id == login_data.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if not verify_password(login_data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+    
+    return user
 
 
 # ---------------------------------------------------------
@@ -260,7 +295,14 @@ def get_event_balances(event_id: int, db: Session = Depends(get_db)):
             if item.splits:
                 share = item.final_price / len(item.splits)
                 for split in item.splits:
-                    net_balances[split.participant.name] -= share
+                    participant_name = None
+                    if split.participant is not None:
+                        participant_name = split.participant.name
+                    elif split.legacy_user is not None:
+                        participant_name = split.legacy_user.name
+                    if not participant_name:
+                        continue
+                    net_balances[participant_name] -= share
 
     # Step 2: Separate into creditors and debtors
     creditors = []  # people who should receive money
