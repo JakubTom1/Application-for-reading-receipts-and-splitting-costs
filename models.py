@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Table
+from sqlalchemy import Column, Integer, String, Float, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -10,16 +10,29 @@ class DBUser(Base):
 
     # Relationships
     receipts_paid = relationship("DBReceipt", back_populates="payer")
-    splits = relationship("DBItemSplit", back_populates="user")
+    events = relationship("DBEvent", back_populates="owner")
 
 class DBEvent(Base):
     """Table storing events (e.g., 'Trip to Mountains', 'Flat Expenses')."""
     __tablename__ = "events"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), index=True)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
     # Relationships
+    owner = relationship("DBUser", back_populates="events")
+    participants = relationship("DBEventParticipant", back_populates="event", cascade="all, delete-orphan")
     receipts = relationship("DBReceipt", back_populates="event")
+
+class DBEventParticipant(Base):
+    """Table storing event-specific participant names."""
+    __tablename__ = "event_participants"
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"))
+    name = Column(String(100), index=True)
+
+    event = relationship("DBEvent", back_populates="participants")
+    splits = relationship("DBItemSplit", back_populates="participant")
 
 class DBReceipt(Base):
     """Table storing main receipt metadata."""
@@ -49,12 +62,12 @@ class DBItem(Base):
     splits = relationship("DBItemSplit", back_populates="item")
 
 class DBItemSplit(Base):
-    """Join table indicating which users are paying for which items."""
+    """Join table indicating which event participants are paying for which items."""
     __tablename__ = "item_splits"
     id = Column(Integer, primary_key=True, index=True)
     item_id = Column(Integer, ForeignKey("items.id"))
-    user_id = Column(Integer, ForeignKey("users.id"))
+    participant_id = Column(Integer, ForeignKey("event_participants.id"))
 
     # Relationships
     item = relationship("DBItem", back_populates="splits")
-    user = relationship("DBUser", back_populates="splits")
+    participant = relationship("DBEventParticipant", back_populates="splits")

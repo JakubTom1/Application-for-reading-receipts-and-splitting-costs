@@ -16,8 +16,8 @@ class ReceiptItemScanned(BaseModel):
 # SCHEMAS FOR SAVING (Input from Android App)
 # ---------------------------------------------------------
 class SplitUserCreate(BaseModel):
-    """Represents a user assigned to pay for a specific item."""
-    user_id: int
+    """Represents an event participant assigned to pay for a specific item."""
+    participant_id: int
 
 class ReceiptItemCreate(ReceiptItemScanned):
     """Extends the scanned item with a list of users paying for it."""
@@ -38,9 +38,23 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True # Allows Pydantic to read from SQLAlchemy ORM models
 
+class EventParticipantResponse(BaseModel):
+    id: int
+    name: str
+    class Config:
+        from_attributes = True
+
+class EventResponse(BaseModel):
+    id: int
+    name: str
+    owner_id: int
+    participants: List[EventParticipantResponse] = []
+    class Config:
+        from_attributes = True
+
 class ItemSplitResponse(BaseModel):
     id: int
-    user: UserResponse
+    participant: EventParticipantResponse
     class Config:
         from_attributes = True
 
