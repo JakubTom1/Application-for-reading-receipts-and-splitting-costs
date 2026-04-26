@@ -233,10 +233,18 @@ def get_all_receipts(db: Session = Depends(get_db)):
 
 @app.get("/events", response_model=List[schemas.EventResponse])
 def get_all_events(owner_id: int = None, db: Session = Depends(get_db)):
-    """Pobiera listę wydarzeń należących do danego właściciela."""
+    """Pobiera eventy, których user jest właścicielem albo do których ma dostęp przez kod."""
     query = db.query(models.DBEvent)
+
     if owner_id is not None:
-        query = query.filter(models.DBEvent.owner_id == owner_id)
+        query = query.outerjoin(
+            models.DBEventAccess,
+            models.DBEventAccess.event_id == models.DBEvent.id
+        ).filter(
+            (models.DBEvent.owner_id == owner_id) |
+            (models.DBEventAccess.user_id == owner_id)
+        ).distinct()
+
     return query.all()
 
 @app.post("/events", response_model=schemas.EventResponse)
@@ -339,3 +347,106 @@ def get_event_balances(event_id: int, db: Session = Depends(get_db)):
         if d["amount"] < 0.01: d_idx += 1
 
     return {"summary": transactions}
+
+
+# ---------------------------------------------------------
+# 4. EVENT ACCESS SHARING
+# ---------------------------------------------------------
+import random
+import string
+
+def generate_access_code() -> str:
+    """Generate a random 6-digit access code."""
+    return ''.join(random.choices(string.digits, k=6))
+
+@app.post("/events/{event_id}/access-code", response_model=schemas.EventAccessResponse)
+def generate_event_access_code(event_id: int, user_id: int, db: Session = Depends(get_db)):
+    """
+    Generate a 6-digit access code for an event (only owner can do this).
+    Other users can use this code to join the event.
+    """
+    event = db.query(models.DBEvent).filter(models.DBEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    if event.owner_id != user_id:
+        raise HTTPException(status_code=403, detail="Only event owner can generate access code")
+    
+    # Generate new code
+    access_code = generate_access_code()
+    
+    # Remove old access codes for this event
+    db.query(models.DBEventAccess).filter(
+        models.DBEventAccess.event_id == event_id
+    ).delete()
+    
+    # Create new access code entry
+    new_access = models.DBEventAccess(
+        event_id=event_id,
+        user_id=user_id,
+        access_code=access_code
+    )
+    db.add(new_access)
+    db.commit()
+    db.refresh(new_access)
+    
+    return new_access
+
+@app.post("/events/join", response_model=schemas.EventResponse)
+def join_event_with_code(join_data: schemas.JoinEventRequest, user_id: int, db: Session = Depends(get_db)):
+    """
+    Join an event using a 6-digit access code.
+    """
+    # Find event access record by code
+    access = db.query(models.DBEventAccess).filter(
+        models.DBEventAccess.access_code == join_data.access_code
+    ).first()
+    
+    if not access:
+        raise HTTPException(status_code=404, detail="Invalid access code")
+    
+    event = access.event
+    
+    # Check if user already has access
+    existing_access = db.query(models.DBEventAccess).filter(
+        models.DBEventAccess.event_id == event.id,
+        models.DBEventAccess.user_id == user_id
+    ).first()
+    
+    if existing_access:
+        return event
+    
+    # Grant access to this user
+    user_access = models.DBEventAccess(
+        event_id=event.id,
+        user_id=user_id,
+        access_code=join_data.access_code
+    )
+    db.add(user_access)
+    db.commit()
+    db.refresh(user_access)
+    
+    return event
+
+@app.get("/events/{event_id}/users", response_model=List[schemas.UserResponse])
+def get_event_users(event_id: int, db: Session = Depends(get_db)):
+    """
+    Get all users who have access to this event (owner + shared users).
+    """
+    event = db.query(models.DBEvent).filter(models.DBEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    # Get all users with access via DBEventAccess
+    users_with_access = db.query(models.DBUser).join(
+        models.DBEventAccess,
+        models.DBEventAccess.user_id == models.DBUser.id
+    ).filter(
+        models.DBEventAccess.event_id == event_id
+    ).all()
+    
+    # Add owner
+    result = [event.owner] if event.owner not in users_with_access else []
+    result.extend(users_with_access)
+    
+    return list(set(result))  # Remove duplicates

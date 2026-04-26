@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
+from datetime import datetime
 from database import Base
 
 class DBUser(Base):
@@ -12,6 +13,7 @@ class DBUser(Base):
     # Relationships
     receipts_paid = relationship("DBReceipt", back_populates="payer")
     events = relationship("DBEvent", back_populates="owner")
+    event_access = relationship("DBEventAccess", back_populates="user")
 
 class DBEvent(Base):
     """Table storing events (e.g., 'Trip to Mountains', 'Flat Expenses')."""
@@ -74,3 +76,16 @@ class DBItemSplit(Base):
     item = relationship("DBItem", back_populates="splits")
     participant = relationship("DBEventParticipant", back_populates="splits")
     legacy_user = relationship("DBUser")
+
+class DBEventAccess(Base):
+    """Table storing which users have access to which events (beyond ownership)."""
+    __tablename__ = "event_access"
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    access_code = Column(String(6), index=True)  # 6-digit code used to grant access
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    event = relationship("DBEvent")
+    user = relationship("DBUser", back_populates="event_access")

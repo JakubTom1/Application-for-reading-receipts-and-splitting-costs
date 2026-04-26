@@ -48,6 +48,18 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True # Allows Pydantic to read from SQLAlchemy ORM models
 
+class EventAccessResponse(BaseModel):
+    """Response for event access code."""
+    event_id: int
+    access_code: str
+    class Config:
+        from_attributes = True
+
+class JoinEventRequest(BaseModel):
+    """Request to join an event with access code."""
+    access_code: str
+
+
 class EventParticipantResponse(BaseModel):
     id: int
     name: str
