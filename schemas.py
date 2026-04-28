@@ -25,6 +25,7 @@ class ReceiptItemCreate(ReceiptItemScanned):
 
 class ReceiptCreate(BaseModel):
     """Payload sent by the Android app when saving a verified receipt."""
+    name: str
     payer_id: int
     event_id: Optional[int] = None
     items: List[ReceiptItemCreate]
@@ -34,19 +35,19 @@ class ReceiptCreate(BaseModel):
 # ---------------------------------------------------------
 class UserCreate(BaseModel):
     """Schema for creating a new user with a password."""
-    name: str
+    username: str
     password: str
 
 class LoginRequest(BaseModel):
     """Schema for user login request."""
-    user_id: int
+    username: str
     password: str
 
 class UserResponse(BaseModel):
     id: int
-    name: str
+    username: str
     class Config:
-        from_attributes = True # Allows Pydantic to read from SQLAlchemy ORM models
+        from_attributes = True
 
 class EventAccessResponse(BaseModel):
     """Response for event access code."""
@@ -88,7 +89,8 @@ class ItemResponse(ReceiptItemScanned):
 
 class ReceiptResponse(BaseModel):
     id: int
-    payer: UserResponse
+    name: str  # Tego brakowało
+    payer: EventParticipantResponse 
     event_id: Optional[int]
     items: List[ItemResponse]
     class Config:

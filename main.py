@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from typing import List, Dict
 from collections import defaultdict
 import traceback
@@ -51,12 +52,12 @@ def get_users(db: Session = Depends(get_db)):
 def create_user(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
     """Adds a new person to the settlements with a password."""
     # Check if user with this name already exists
-    existing_user = db.query(models.DBUser).filter(models.DBUser.name == user_data.name).first()
+    existing_user = db.query(models.DBUser).filter(models.DBUser.username == user_data.username).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="User with this name already exists")
     
     hashed_password = hash_password(user_data.password)
-    new_user = models.DBUser(name=user_data.name, password_hash=hashed_password)
+    new_user = models.DBUser(username=user_data.username, password_hash=hashed_password)
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -65,7 +66,7 @@ def create_user(user_data: schemas.UserCreate, db: Session = Depends(get_db)):
 @app.post("/login", response_model=schemas.UserResponse)
 def login_user(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
     """Authenticates a user with their password."""
-    user = db.query(models.DBUser).filter(models.DBUser.id == login_data.user_id).first()
+    user = db.query(models.DBUser).filter(models.DBUser.username == login_data.username).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -85,18 +86,13 @@ async def analyze_receipt(file: UploadFile = File(...)):
     the recognized products to the app for user verification.
     """
     total_start_time = time.time()
-    max_attempts = 2  # 🔽 było 3 (mniej retry = mniej czekania)
+    max_attempts = 2
 
-    # -----------------------------
-    # 1. READ FILE (z pomiarem)
-    # -----------------------------
+
     t0 = time.time()
     image_bytes = await file.read()
-    print(f"📥 File read time: {time.time() - t0:.2f}s")
+    print(f"File read time: {time.time() - t0:.2f}s")
 
-    # -----------------------------
-    # 2. (OPCJONALNIE) RESIZE OBRAZU
-    # -----------------------------
     try:
         from PIL import Image
         import io
@@ -104,20 +100,17 @@ async def analyze_receipt(file: UploadFile = File(...)):
         t_resize = time.time()
 
         img = Image.open(io.BytesIO(image_bytes))
-        img.thumbnail((1024, 1024))  # 🔥 ogromny boost dla AI
+        img.thumbnail((1024, 1024))
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=80)
         image_bytes = buf.getvalue()
 
-        print(f"🖼️ Resize time: {time.time() - t_resize:.2f}s")
+        print(f"Resize time: {time.time() - t_resize:.2f}s")
 
     except Exception as e:
-        print("⚠️ Resize skipped:", e)
+        print("Resize skipped:", e)
 
-    # -----------------------------
-    # 3. GEMINI CALL + RETRY
-    # -----------------------------
     for attempt in range(max_attempts):
         try:
             t1 = time.time()
@@ -127,15 +120,15 @@ async def analyze_receipt(file: UploadFile = File(...)):
                 image_bytes
             )
 
-            print(f"🤖 Gemini time: {time.time() - t1:.2f}s")
+            print(f"Gemini time: {time.time() - t1:.2f}s")
 
             total_time = time.time() - total_start_time
-            print(f"🚀 TOTAL /analyze time: {total_time:.2f}s\n")
+            print(f"TOTAL /analyze time: {total_time:.2f}s\n")
 
             return validated_items
 
         except ValueError as e:
-            print(f"❌ DATA ERROR (400): {e}")
+            print(f"DATA ERROR (400): {e}")
             raise HTTPException(status_code=400, detail=str(e))
 
         except Exception as e:
@@ -144,16 +137,15 @@ async def analyze_receipt(file: UploadFile = File(...)):
             is_rate_limit = "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg
             is_overload = "503" in error_msg and "high demand" in error_msg
 
-            print(f"⚠️ Attempt {attempt+1} failed: {error_msg}")
+            print(f"Attempt {attempt+1} failed: {error_msg}")
 
-            # 🔥 DUŻA ZMIANA: krótszy retry
             if (is_rate_limit or is_overload) and attempt < max_attempts - 1:
-                wait_time = 5  # 🔽 było 38 sekund
-                print(f"⏳ Retrying in {wait_time}s...\n")
+                wait_time = 5
+                print(f"Retrying in {wait_time}s...\n")
                 await asyncio.sleep(wait_time)
                 continue
 
-            print("💥 FINAL ERROR:")
+            print("FINAL ERROR:")
             traceback.print_exc()
 
             raise HTTPException(
@@ -161,6 +153,9 @@ async def analyze_receipt(file: UploadFile = File(...)):
                 detail="AI is currently unavailable. Try again."
             )
 
+@app.get("/events/{event_id}/receipts", response_model=List[schemas.ReceiptResponse])
+def get_event_receipts(event_id: int, db: Session = Depends(get_db)):
+    return db.query(models.DBReceipt).filter(models.DBReceipt.event_id == event_id).all()
 
 @app.post("/receipts/save")
 def save_final_receipt(payload: schemas.ReceiptCreate, db: Session = Depends(get_db)):
@@ -168,59 +163,54 @@ def save_final_receipt(payload: schemas.ReceiptCreate, db: Session = Depends(get
     STEP 2: The app sends the corrected receipt with assigned participants.
     We save the receipt, products, and create splits (which event participants pay for what).
     """
-    # Check if the payer exists
-    payer = db.query(models.DBUser).filter(models.DBUser.id == payload.payer_id).first()
-    if not payer:
-        raise HTTPException(status_code=404, detail="Payer user not found")
-
-    # Validate the event if provided
-    event = None
-    if payload.event_id is not None:
-        event = db.query(models.DBEvent).filter(models.DBEvent.id == payload.event_id).first()
-        if not event:
-            raise HTTPException(status_code=404, detail="Event not found")
-
-    # 1. Create the main receipt entry (with info on who paid upfront)
-    new_receipt = models.DBReceipt(
-        payer_id=payload.payer_id,
-        event_id=payload.event_id
-    )
+    new_receipt = models.DBReceipt(name=payload.name, payer_id=payload.payer_id, event_id=payload.event_id)
     db.add(new_receipt)
     db.commit()
     db.refresh(new_receipt)
 
-    # 2. Saving individual products
     for item_data in payload.items:
         db_item = models.DBItem(
-            receipt_id=new_receipt.id,
-            name=item_data.name,
-            quantity=item_data.quantity,
-            unit_price=item_data.unit_price,
-            discount=item_data.discount,
-            final_price=item_data.final_price
+            receipt_id=new_receipt.id, name=item_data.name, quantity=item_data.quantity,
+            unit_price=item_data.unit_price, discount=item_data.discount, final_price=item_data.final_price
         )
         db.add(db_item)
         db.commit()
         db.refresh(db_item)
-
-        # 3. Saving SPLITS (Who participates in the cost of this product)
         for split_data in item_data.split_among:
-            participant = db.query(models.DBEventParticipant).filter(
-                models.DBEventParticipant.id == split_data.participant_id
-            ).first()
-            if not participant:
-                raise HTTPException(status_code=404, detail="Event participant not found")
-            if event and participant.event_id != event.id:
-                raise HTTPException(status_code=400, detail="Participant does not belong to the receipt event")
-
-            db_split = models.DBItemSplit(
-                item_id=db_item.id,
-                participant_id=split_data.participant_id
-            )
+            db_split = models.DBItemSplit(item_id=db_item.id, participant_id=split_data.participant_id)
             db.add(db_split)
-
     db.commit()
-    return {"status": "success", "receipt_id": new_receipt.id}
+    return {"status": "success"}
+
+
+@app.put("/receipts/{receipt_id}")
+def update_receipt(receipt_id: int, payload: schemas.ReceiptCreate, db: Session = Depends(get_db)):
+    receipt = db.query(models.DBReceipt).filter(models.DBReceipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(404, "Receipt not found")
+
+    receipt.name = payload.name
+    receipt.payer_id = payload.payer_id
+
+    # Czyszczenie starych produktów
+    for item in receipt.items:
+        db.query(models.DBItemSplit).filter(models.DBItemSplit.item_id == item.id).delete()
+    db.query(models.DBItem).filter(models.DBItem.receipt_id == receipt_id).delete()
+
+    # Wrzucenie nowych po edycji
+    for item_data in payload.items:
+        db_item = models.DBItem(
+            receipt_id=receipt.id, name=item_data.name, quantity=item_data.quantity,
+            unit_price=item_data.unit_price, discount=item_data.discount, final_price=item_data.final_price
+        )
+        db.add(db_item)
+        db.commit()
+        db.refresh(db_item)
+        for split_data in item_data.split_among:
+            db_split = models.DBItemSplit(item_id=db_item.id, participant_id=split_data.participant_id)
+            db.add(db_split)
+    db.commit()
+    return {"status": "updated"}
 
 
 # ---------------------------------------------------------
@@ -248,36 +238,39 @@ def get_all_events(owner_id: int = None, db: Session = Depends(get_db)):
     return query.all()
 
 @app.post("/events", response_model=schemas.EventResponse)
-def create_event(name: str, owner_id: int, db: Session = Depends(get_db)):
-    """Tworzy nowe wydarzenie do rozliczeń dla konkretnego właściciela."""
-    owner = db.query(models.DBUser).filter(models.DBUser.id == owner_id).first()
-    if not owner:
-        raise HTTPException(status_code=404, detail="Event owner not found")
-
+def create_event(name: str, owner_id: int, participant_name: str, db: Session = Depends(get_db)):
+    """Tworzy event i od razu przypisuje właścicielowi wybrane imię."""
     new_event = models.DBEvent(name=name, owner_id=owner_id)
     db.add(new_event)
     db.commit()
     db.refresh(new_event)
+
+    # Tworzymy uczestnika dla właściciela z wybranym imieniem
+    participant = models.DBEventParticipant(
+        event_id=new_event.id,
+        user_id=owner_id,
+        name=participant_name
+    )
+    db.add(participant)
+    db.commit()
     return new_event
 
 @app.get("/events/{event_id}/participants", response_model=List[schemas.EventParticipantResponse])
 def get_event_participants(event_id: int, db: Session = Depends(get_db)):
     event = db.query(models.DBEvent).filter(models.DBEvent.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    return event.participants
+    return event.participants if event else []
 
 @app.post("/events/{event_id}/participants", response_model=schemas.EventParticipantResponse)
 def create_event_participant(event_id: int, name: str, db: Session = Depends(get_db)):
-    event = db.query(models.DBEvent).filter(models.DBEvent.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    participant = models.DBEventParticipant(event_id=event.id, name=name)
-    db.add(participant)
-    db.commit()
-    db.refresh(participant)
-    return participant
+    try:
+        participant = models.DBEventParticipant(event_id=event_id, name=name)
+        db.add(participant)
+        db.commit()
+        db.refresh(participant)
+        return participant
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Person with this name already exists in this event!")
 
 @app.get("/events/{event_id}/balances")
 def get_event_balances(event_id: int, db: Session = Depends(get_db)):
@@ -289,60 +282,35 @@ def get_event_balances(event_id: int, db: Session = Depends(get_db)):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # Step 1: Calculate net balance for each user in this event
-    # positive = someone is owed money, negative = someone owes money
     net_balances = defaultdict(float)
-
     for receipt in event.receipts:
-        # Payer gets credit for the total amount
         receipt_total = sum(item.final_price for item in receipt.items)
         net_balances[receipt.payer.name] += receipt_total
-
-        # Each item consumer gets a "debt" share
         for item in receipt.items:
             if item.splits:
                 share = item.final_price / len(item.splits)
                 for split in item.splits:
-                    participant_name = None
-                    if split.participant is not None:
-                        participant_name = split.participant.name
-                    elif split.legacy_user is not None:
-                        participant_name = split.legacy_user.name
-                    if not participant_name:
-                        continue
-                    net_balances[participant_name] -= share
+                    if split.participant:
+                        net_balances[split.participant.name] -= share
 
-    # Step 2: Separate into creditors and debtors
-    creditors = []  # people who should receive money
-    debtors = []  # people who must pay
-
+    creditors, debtors = [], []
     for name, balance in net_balances.items():
         if balance > 0.01:
             creditors.append({"name": name, "amount": balance})
         elif balance < -0.01:
             debtors.append({"name": name, "amount": abs(balance)})
 
-    # Step 3: Greedy algorithm to minimize transactions
     transactions = []
     creditors.sort(key=lambda x: x["amount"], reverse=True)
     debtors.sort(key=lambda x: x["amount"], reverse=True)
-
     c_idx, d_idx = 0, 0
     while c_idx < len(creditors) and d_idx < len(debtors):
-        c = creditors[c_idx]
-        d = debtors[d_idx]
-
+        c, d = creditors[c_idx], debtors[d_idx]
         amount = min(c["amount"], d["amount"])
         if amount > 0.01:
-            transactions.append({
-                "from": d["name"],
-                "to": c["name"],
-                "amount": round(amount, 2)
-            })
-
+            transactions.append({"from": d["name"], "to": c["name"], "amount": round(amount, 2)})
         c["amount"] -= amount
         d["amount"] -= amount
-
         if c["amount"] < 0.01: c_idx += 1
         if d["amount"] < 0.01: d_idx += 1
 
@@ -352,8 +320,7 @@ def get_event_balances(event_id: int, db: Session = Depends(get_db)):
 # ---------------------------------------------------------
 # 4. EVENT ACCESS SHARING
 # ---------------------------------------------------------
-import random
-import string
+import random, string
 
 def generate_access_code() -> str:
     """Generate a random 6-digit access code."""
@@ -392,40 +359,42 @@ def generate_event_access_code(event_id: int, user_id: int, db: Session = Depend
     
     return new_access
 
+
 @app.post("/events/join", response_model=schemas.EventResponse)
-def join_event_with_code(join_data: schemas.JoinEventRequest, user_id: int, db: Session = Depends(get_db)):
-    """
-    Join an event using a 6-digit access code.
-    """
-    # Find event access record by code
-    access = db.query(models.DBEventAccess).filter(
-        models.DBEventAccess.access_code == join_data.access_code
-    ).first()
-    
+def join_event_with_code(join_data: schemas.JoinEventRequest, user_id: int, participant_name: str,
+                         db: Session = Depends(get_db)):
+    access = db.query(models.DBEventAccess).filter(models.DBEventAccess.access_code == join_data.access_code).first()
     if not access:
-        raise HTTPException(status_code=404, detail="Invalid access code")
-    
+        raise HTTPException(status_code=404, detail="Event not found")
+
     event = access.event
-    
-    # Check if user already has access
+
     existing_access = db.query(models.DBEventAccess).filter(
-        models.DBEventAccess.event_id == event.id,
-        models.DBEventAccess.user_id == user_id
+        models.DBEventAccess.event_id == event.id, models.DBEventAccess.user_id == user_id
     ).first()
-    
-    if existing_access:
-        return event
-    
-    # Grant access to this user
-    user_access = models.DBEventAccess(
-        event_id=event.id,
-        user_id=user_id,
-        access_code=join_data.access_code
-    )
-    db.add(user_access)
+    if not existing_access:
+        db.add(models.DBEventAccess(event_id=event.id, user_id=user_id, access_code=join_data.access_code))
+
+    existing_p = db.query(models.DBEventParticipant).filter(
+        models.DBEventParticipant.event_id == event.id, models.DBEventParticipant.user_id == user_id
+    ).first()
+
+    if not existing_p:
+        target_participant = db.query(models.DBEventParticipant).filter(
+            models.DBEventParticipant.event_id == event.id, models.DBEventParticipant.name == participant_name
+        ).first()
+
+        if target_participant:
+            if target_participant.user_id is not None:
+                raise HTTPException(status_code=400,
+                                    detail="Name is already taken!")
+            else:
+                target_participant.user_id = user_id
+        else:
+            new_p = models.DBEventParticipant(event_id=event.id, user_id=user_id, name=participant_name)
+            db.add(new_p)
+
     db.commit()
-    db.refresh(user_access)
-    
     return event
 
 @app.get("/events/{event_id}/users", response_model=List[schemas.UserResponse])
