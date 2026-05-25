@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import List, Optional
-
+from datetime import datetime
 # ---------------------------------------------------------
 # SCHEMAS FOR AI ANALYSIS (Output from Gemini)
 # ---------------------------------------------------------
@@ -95,3 +95,30 @@ class ReceiptResponse(BaseModel):
     items: List[ItemResponse]
     class Config:
         from_attributes = True
+
+class SettlementCreate(BaseModel):
+    from_participant_id: int
+    to_participant_id: int
+    amount: float
+    note: Optional[str] = None
+
+class SettlementResponse(BaseModel):
+    id: int
+    from_participant: EventParticipantResponse
+    to_participant: EventParticipantResponse
+    amount: float
+    note: Optional[str]
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class ParticipantBalance(BaseModel):
+    participant: EventParticipantResponse
+    total_paid: float      # ile zapłacił przy kasie
+    total_consumed: float  # ile skonsumował
+    net_balance: float     # paid - consumed (+ = należy mu się, - = jest winien)
+
+class EventBalancesResponse(BaseModel):
+    balances: List[ParticipantBalance]
+    settlements_history: List[SettlementResponse]
+    suggested_transactions: List[dict]  # [{from, to, amount}] - uproszczone długi do spłaty

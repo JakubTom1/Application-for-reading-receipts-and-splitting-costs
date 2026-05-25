@@ -81,3 +81,18 @@ class DBEventAccess(Base):
 
     event = relationship("DBEvent")
     user = relationship("DBUser", back_populates="event_access")
+
+
+class DBSettlement(Base):
+    __tablename__ = "settlements"
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=False)
+    from_participant_id = Column(Integer, ForeignKey("event_participants.id"), nullable=False)
+    to_participant_id = Column(Integer, ForeignKey("event_participants.id"), nullable=False)
+    amount = Column(Float, nullable=False)
+    note = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    event = relationship("DBEvent")
+    from_participant = relationship("DBEventParticipant", foreign_keys=[from_participant_id])
+    to_participant = relationship("DBEventParticipant", foreign_keys=[to_participant_id])

@@ -272,37 +272,68 @@ def create_event_participant(event_id: int, name: str, db: Session = Depends(get
         db.rollback()
         raise HTTPException(status_code=400, detail="Person with this name already exists in this event!")
 
-@app.get("/events/{event_id}/balances")
+@app.get("/events/{event_id}/balances", response_model=schemas.EventBalancesResponse)
 def get_event_balances(event_id: int, db: Session = Depends(get_db)):
     """
-    Calculates simplified debts for a specific event (Tricount style).
-    Algorithm: Net Balance = Total Paid - Total Consumed.
+    Zwraca szczegółowe salda uczestników eventu z uwzględnieniem
+    już dokonanych spłat (DBSettlement). Styl Tricount.
     """
     event = db.query(models.DBEvent).filter(models.DBEvent.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    net_balances = defaultdict(float)
+    # --- 1. Oblicz net balance z paragonów ---
+    paid = defaultdict(float)    # ile kto wydał przy kasie
+    consumed = defaultdict(float) # ile kto skonsumował
+
+    participant_objects = {p.name: p for p in event.participants}
+
     for receipt in event.receipts:
+        if not receipt.payer:
+            continue
         receipt_total = sum(item.final_price for item in receipt.items)
-        net_balances[receipt.payer.name] += receipt_total
+        paid[receipt.payer.name] += receipt_total
         for item in receipt.items:
             if item.splits:
                 share = item.final_price / len(item.splits)
                 for split in item.splits:
                     if split.participant:
-                        net_balances[split.participant.name] -= share
+                        consumed[split.participant.name] += share
 
-    creditors, debtors = [], []
-    for name, balance in net_balances.items():
-        if balance > 0.01:
-            creditors.append({"name": name, "amount": balance})
-        elif balance < -0.01:
-            debtors.append({"name": name, "amount": abs(balance)})
+    # --- 2. Uwzględnij spłaty z DBSettlement ---
+    settlements = db.query(models.DBSettlement).filter(
+        models.DBSettlement.event_id == event_id
+    ).all()
 
-    transactions = []
+    net = defaultdict(float)
+    for name in set(list(paid.keys()) + list(consumed.keys())):
+        net[name] = paid.get(name, 0.0) - consumed.get(name, 0.0)
+
+    for s in settlements:
+        # from_participant spłacił to_participant — zmniejsza jego dług, zmniejsza należność
+        net[s.from_participant.name] += s.amount
+        net[s.to_participant.name] -= s.amount
+
+    # --- 3. Buduj response balances ---
+    all_names = set(list(paid.keys()) + list(consumed.keys()))
+    balances = []
+    for name in all_names:
+        p = participant_objects.get(name)
+        if p:
+            balances.append(schemas.ParticipantBalance(
+                participant=p,
+                total_paid=round(paid.get(name, 0.0), 2),
+                total_consumed=round(consumed.get(name, 0.0), 2),
+                net_balance=round(net.get(name, 0.0), 2)
+            ))
+
+    # --- 4. Uproszczone transakcje (greedy) ---
+    creditors = [{"name": n, "amount": v} for n, v in net.items() if v > 0.01]
+    debtors   = [{"name": n, "amount": abs(v)} for n, v in net.items() if v < -0.01]
     creditors.sort(key=lambda x: x["amount"], reverse=True)
     debtors.sort(key=lambda x: x["amount"], reverse=True)
+
+    transactions = []
     c_idx, d_idx = 0, 0
     while c_idx < len(creditors) and d_idx < len(debtors):
         c, d = creditors[c_idx], debtors[d_idx]
@@ -314,7 +345,60 @@ def get_event_balances(event_id: int, db: Session = Depends(get_db)):
         if c["amount"] < 0.01: c_idx += 1
         if d["amount"] < 0.01: d_idx += 1
 
-    return {"summary": transactions}
+    return schemas.EventBalancesResponse(
+        balances=balances,
+        settlements_history=settlements,
+        suggested_transactions=transactions
+    )
+
+
+@app.post("/events/{event_id}/settlements", response_model=schemas.SettlementResponse)
+def record_settlement(event_id: int, payload: schemas.SettlementCreate, db: Session = Depends(get_db)):
+    """
+    Zapisuje fakt spłaty — np. Kasia oddaje Norbertowi 45 zł.
+    To przesuwa salda w kolejnym wywołaniu /balances.
+    """
+    event = db.query(models.DBEvent).filter(models.DBEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # Walidacja uczestników
+    from_p = db.query(models.DBEventParticipant).filter(
+        models.DBEventParticipant.id == payload.from_participant_id,
+        models.DBEventParticipant.event_id == event_id
+    ).first()
+    to_p = db.query(models.DBEventParticipant).filter(
+        models.DBEventParticipant.id == payload.to_participant_id,
+        models.DBEventParticipant.event_id == event_id
+    ).first()
+
+    if not from_p or not to_p:
+        raise HTTPException(status_code=400, detail="Participant not found in this event")
+
+    settlement = models.DBSettlement(
+        event_id=event_id,
+        from_participant_id=payload.from_participant_id,
+        to_participant_id=payload.to_participant_id,
+        amount=payload.amount,
+        note=payload.note
+    )
+    db.add(settlement)
+    db.commit()
+    db.refresh(settlement)
+    return settlement
+
+
+@app.delete("/events/{event_id}/settlements/{settlement_id}", status_code=204)
+def delete_settlement(event_id: int, settlement_id: int, db: Session = Depends(get_db)):
+    """Usuwa spłatę (np. jeśli wpisano przez pomyłkę)."""
+    s = db.query(models.DBSettlement).filter(
+        models.DBSettlement.id == settlement_id,
+        models.DBSettlement.event_id == event_id
+    ).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Settlement not found")
+    db.delete(s)
+    db.commit()
 
 
 # ---------------------------------------------------------
